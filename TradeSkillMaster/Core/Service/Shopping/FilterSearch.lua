@@ -12,6 +12,9 @@ local TempTable = TSM.LibTSMUtil:Include("BaseType.TempTable")
 local String = TSM.LibTSMUtil:Include("Lua.String")
 local Math = TSM.LibTSMUtil:Include("Lua.Math")
 local ItemString = TSM.LibTSMTypes:Include("Item.ItemString")
+--! WotLK fix: read the compat layer's Enum, not the global. A neighbour addon owning _G.Enum can
+--! publish auction-category class ids (Weapon=1, Armor=2), which silently misfiles the filters below.
+local Enum = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.Enum or Enum
 local Conversion = TSM.LibTSMTypes:Include("Item.Conversion")
 local DisenchantData = TSM.LibTSMData:Include("Disenchant")
 local CustomString = TSM.LibTSMTypes:Include("CustomString")

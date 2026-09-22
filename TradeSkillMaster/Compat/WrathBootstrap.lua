@@ -6,6 +6,29 @@
 
 local _G = _G
 
+--! WotLK fix: the compat layer's private table (Compat/ClassicAPI/Util/_Prelude.lua). It always exists
+--! by the time this file runs -- the layer's Load.xml is toc entry 26, this file is 29 -- and it is where
+--! the layer keeps the implementations TSM itself must read, whether or not the standalone !!!ClassicAPI
+--! addon owns the matching global. Guarded with `and` anyway so a stripped-down install degrades instead
+--! of erroring on the first line.
+local ClassicAPIPrivate = _G.__TSM_ClassicAPI_Private
+
+--! WotLK fix: the C_Item table TSM actually reads. The compat layer no longer takes _G.C_Item away
+--! from the standalone !!!ClassicAPI addon when that addon is installed -- it keeps its own copy in
+--! __TSM_ClassicAPI_Private and TSM's call sites read that one (see Compat/ClassicAPI/Util/_Prelude.lua).
+--! The three patch blocks further down (GetItemClassInfo, the GetItemSubClassInfo wrapper, and
+--! GetItemFamily / GetDetailedItemLevelInfo) have to land on the SAME table, or under coexistence they
+--! would decorate the neighbour's copy while TSM reads ours and finds those functions missing. Where
+--! nobody else owns the name, Private.C_Item and _G.C_Item are the same table and one write covers both.
+--! The neighbour's own copy is deliberately left alone: one of the three is a wrapper that REPLACES
+--! GetItemSubClassInfo, and replacing a live implementation somebody else's code is built against is
+--! exactly what the layer stopped doing.
+local TSM_C_Item = ClassicAPIPrivate and ClassicAPIPrivate.C_Item
+if not TSM_C_Item then
+	TSM_C_Item = _G.C_Item or {}
+	_G.C_Item = TSM_C_Item
+end
+
 -- ============================================================================
 -- WOW_PROJECT_* constants
 -- ============================================================================
@@ -64,8 +87,12 @@ C_CVar.RegisterCVar   = C_CVar.RegisterCVar   or _G.RegisterCVar or function() e
 -- Enum stubs — fields must exist so retail-AH branches parse, even if unused
 -- ============================================================================
 
+--! WotLK fix: write the stubs into OUR Enum, not into whoever owns _G.Enum. With the standalone
+--! !!!ClassicAPI installed that global is theirs while TSM reads Private.Enum, so writing only to _G
+--! put AuctionHouseFilter and ItemCommodityStatus where TSM could not see them. Gap-filled back into
+--! _G at the end of this file.
 _G.Enum = _G.Enum or {}
-local Enum = _G.Enum
+local Enum = ClassicAPIPrivate and ClassicAPIPrivate.Enum or _G.Enum
 
 Enum.AuctionHouseSortOrder = Enum.AuctionHouseSortOrder or {
 	Price    = 0,
@@ -358,10 +385,9 @@ end
 -- Bridges to the global 3.3.5 GetItemClassInfo if present, otherwise static map.
 -- ============================================================================
 
-if not _G.C_Item then _G.C_Item = {} end
-if not _G.C_Item.GetItemClassInfo then
+if not TSM_C_Item.GetItemClassInfo then
 	if type(_G.GetItemClassInfo) == "function" then
-		_G.C_Item.GetItemClassInfo = _G.GetItemClassInfo
+		TSM_C_Item.GetItemClassInfo = _G.GetItemClassInfo
 	else
 		local CLASS_NAMES = {
 			[0]  = "Consumable",
@@ -380,7 +406,7 @@ if not _G.C_Item.GetItemClassInfo then
 			[15] = "Miscellaneous",
 			[16] = "Glyph",
 		}
-		_G.C_Item.GetItemClassInfo = function(classID) return CLASS_NAMES[classID] end
+		TSM_C_Item.GetItemClassInfo = function(classID) return CLASS_NAMES[classID] end
 	end
 end
 
@@ -456,9 +482,9 @@ end
 -- ============================================================================
 
 do
-	local orig = _G.C_Item and _G.C_Item.GetItemSubClassInfo
+	local orig = TSM_C_Item.GetItemSubClassInfo
 	if orig then
-		_G.C_Item.GetItemSubClassInfo = function(classID, subClassID)
+		TSM_C_Item.GetItemSubClassInfo = function(classID, subClassID)
 			if type(subClassID) ~= "number" then
 				return subClassID, false
 			end
@@ -473,31 +499,43 @@ end
 -- Also expose under C_AddOns for code paths that reach for the namespaced form.
 -- ============================================================================
 
+--! WotLK fix: the resolver is a named local now, and C_AddOns gets OURS instead of whatever owns the
+--! loose global. The two lines that follow used to read `_G.GetAddOnEnableState`, and with the standalone
+--! !!!ClassicAPI addon installed that global is theirs -- `GetAddOnEnableState(Character, Index)`, the
+--! legacy WotLK argument order. TSM's single call site (LibTSMWoW/Source/API/Addon.lua:54) calls
+--! C_AddOns.GetAddOnEnableState(name, character), i.e. name FIRST, so their version would take the addon
+--! name for a character name and call GetAddOnInfo(nil). The bundled layer fixed that in Util/API.lua,
+--! but that file still opts out under coexistence, so the fix has to exist here as well. Their loose
+--! global is left exactly as it is -- other addons are built against it.
+local function ResolveAddOnEnableState(name_or_character, maybe_name)
+	-- Retail signature: GetAddOnEnableState(character, name). Some callers
+	-- pass (name, character). Accept either.
+	local n1, n2 = name_or_character, maybe_name
+	local name = (type(n2) == "string" and n2 ~= "" and n2) or (type(n1) == "string" and n1) or nil
+	if not name then return 0 end
+	-- Loaded implies enabled.
+	if _G.IsAddOnLoaded(name) then return 2 end
+	-- Enabled-but-not-yet-loaded (load-on-demand, or an addon that loads AFTER
+	-- this one alphabetically — the backport loads Accounting/Crafting after the
+	-- core) must still report "All" (2), not "Some" (1), or Addon.IsEnabled()
+	-- would wrongly treat it as disabled. Use GetAddOnInfo's enabled flag.
+	-- pcall: GetAddOnInfo errors on unknown addon names on 3.3.5.
+	local ok, _, _, _, enabled = pcall(_G.GetAddOnInfo, name)
+	if not ok then return 0 end
+	return enabled and 2 or 0
+end
+
 if type(_G.GetAddOnEnableState) ~= "function" then
-	_G.GetAddOnEnableState = function(name_or_character, maybe_name)
-		-- Retail signature: GetAddOnEnableState(character, name). Some callers
-		-- pass (name, character). Accept either.
-		local n1, n2 = name_or_character, maybe_name
-		local name = (type(n2) == "string" and n2 ~= "" and n2) or (type(n1) == "string" and n1) or nil
-		if not name then return 0 end
-		-- Loaded implies enabled.
-		if _G.IsAddOnLoaded(name) then return 2 end
-		-- Enabled-but-not-yet-loaded (load-on-demand, or an addon that loads AFTER
-		-- this one alphabetically — the backport loads Accounting/Crafting after the
-		-- core) must still report "All" (2), not "Some" (1), or Addon.IsEnabled()
-		-- would wrongly treat it as disabled. Use GetAddOnInfo's enabled flag.
-		-- pcall: GetAddOnInfo errors on unknown addon names on 3.3.5.
-		local ok, _, _, _, enabled = pcall(_G.GetAddOnInfo, name)
-		if not ok then return 0 end
-		return enabled and 2 or 0
-	end
+	_G.GetAddOnEnableState = ResolveAddOnEnableState
 end
 if _G.C_AddOns then
-	_G.C_AddOns.GetAddOnEnableState = _G.C_AddOns.GetAddOnEnableState or _G.GetAddOnEnableState
+	_G.C_AddOns.GetAddOnEnableState = _G.C_AddOns.GetAddOnEnableState or ResolveAddOnEnableState
 end
 -- Enum.AddOnEnableState.All — used by Addon.IsEnabled() comparison
-_G.Enum = _G.Enum or {}
-_G.Enum.AddOnEnableState = _G.Enum.AddOnEnableState or { None = 0, Some = 1, All = 2 }
+Enum.AddOnEnableState = Enum.AddOnEnableState or { None = 0, Some = 1, All = 2 }
+-- Enum.SeasonID — empty on purpose: 3.3.5a has no seasons, but SessionInfo.lua:103 compares against
+-- Enum.SeasonID.Fresh outside any C_Seasons guard, so the table only has to exist.
+Enum.SeasonID = Enum.SeasonID or {}
 
 -- ============================================================================
 -- CancelEmote — retail (added in Cataclysm 4.0). No-op on 3.3.5.
@@ -530,8 +568,7 @@ end
 -- ============================================================================
 
 do
-	local CI = _G.C_Item or {}
-	_G.C_Item = CI
+	local CI = TSM_C_Item
 	-- C_Item.GetItemFamily(itemInfo) -> int (bag type bitmask)
 	if not CI.GetItemFamily and type(_G.GetItemFamily) == "function" then
 		CI.GetItemFamily = _G.GetItemFamily
@@ -608,13 +645,13 @@ _G.TooltipDataProcessor.AddTooltipPostCall = _G.TooltipDataProcessor.AddTooltipP
 -- Enum.BankType — retail constants for Warband bank flow. Guards exist around
 -- the actual calls (Container.CanAccessWarbank()) but the constants are still
 -- read at module-load when building call tables.
-_G.Enum.BankType = _G.Enum.BankType or { Character = 0, Account = 1 }
+Enum.BankType = Enum.BankType or { Character = 0, Account = 1 }
 
 -- Enum.ItemCommodityStatus — read at AuctionHouseWrapper module load.
-_G.Enum.ItemCommodityStatus = _G.Enum.ItemCommodityStatus or { Unknown = 0, Item = 1, Commodity = 2 }
+Enum.ItemCommodityStatus = Enum.ItemCommodityStatus or { Unknown = 0, Item = 1, Commodity = 2 }
 
 -- Enum.PlayerInteractionType subset used by tooltip/AH wrappers
-_G.Enum.PlayerInteractionType = _G.Enum.PlayerInteractionType or {
+Enum.PlayerInteractionType = Enum.PlayerInteractionType or {
 	None         = 0,
 	TradePartner = 1,
 	Item         = 2,
@@ -818,4 +855,54 @@ do
 		end
 		slider.__tsmSetValueGuarded = true
 	end
+end
+
+-- ============================================================================
+-- MailFrame_Show
+--! WotLK fix: moved here from Compat/ClassicAPI/Util/API.lua. There is no such function in FrameXML
+--! 3.3.5a (grep) and none in the codex -- the name is a ClassicAPI invention, and the standalone
+--! !!!ClassicAPI addon's version replays the whole MAIL_SHOW event through MailFrame_OnEvent, which
+--! calls OpenBackpack(): the player's bags fly open every time TSM hands the mail window back to the
+--! default UI. The bundled layer replaced that global with a replay that leaves OpenBackpack out, but
+--! the file carrying it opts out under coexistence, so the fix went missing exactly when it was needed.
+--! Here it always loads. TSM's single call site (TradeSkillMaster_Mailing/UI/MailingUI_Core.lua) reads
+--! the private copy, and the loose global is filled only when nobody owns it -- with the standalone
+--! installed the global stays theirs, because other addons are built against their behaviour.
+-- ============================================================================
+
+do
+	local function MailFrameShow()
+		-- Replay the native 3.3.5 MAIL_SHOW initialization without its OpenBackpack()
+		-- side effect. Bag replacement addons hook that global and may fail while the
+		-- TSM mailing FSM is restoring the default mail UI.
+		_G.ShowUIPanel(_G.MailFrame)
+		if not _G.MailFrame:IsShown() then
+			_G.CloseMail()
+			return
+		end
+		if _G.IsInGuild() and _G.GetNumGuildMembers() == 0 then
+			_G.GuildRoster()
+		end
+		_G.SendMailFrame_Update()
+		_G.MailFrameTab_OnClick(nil, 1)
+		_G.CheckInbox()
+	end
+
+	if ClassicAPIPrivate then
+		ClassicAPIPrivate.MailFrameShow = MailFrameShow
+	end
+	if type(_G.MailFrame_Show) ~= "function" then
+		_G.MailFrame_Show = MailFrameShow
+	end
+end
+
+-- ============================================================================
+-- Hand the Enum stubs back to _G
+-- ============================================================================
+
+--! WotLK fix: gap-fill only, via the same helper Util/Enum.lua uses -- a neighbour that owns _G.Enum
+--! keeps every key it already has, and gets the ones it lacks. Standalone is a no-op: there
+--! Private.Enum and _G.Enum are one table.
+if ClassicAPIPrivate and ClassicAPIPrivate.Publish then
+	ClassicAPIPrivate.Publish("Enum", Enum)
 end

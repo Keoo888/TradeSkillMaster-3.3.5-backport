@@ -1,4 +1,6 @@
-if __TSM_ClassicAPI_SKIP then return end
+--! WotLK fix: no SKIP guard -- this file carries two of the backport's fixes (IsLocked below and
+--! GetItemInventoryType further down), so opting it out when the standalone !!!ClassicAPI addon is
+--! installed handed TSM the unfixed answers back. See _Prelude.lua for the whole picture.
 local Private = __TSM_ClassicAPI_Private
 
 local _G = _G
@@ -17,8 +19,15 @@ local GetInventoryItemTexture = GetInventoryItemTexture
 local GetInventoryItemQuality = GetInventoryItemQuality
 
 local Tooltip = Private.Tooltip
+-- The scan tooltip's second line, addressed by name -- the 3.3.5a idiom (FrameXML
+-- GameTooltip.lua:126). Built once here rather than per call.
+local TOOLTIP_LINE_2 = Private.TooltipName.."TextLeft2"
 
-local C_Item = C_Item or {}
+--! WotLK fix: a fresh table, not `C_Item or {}`. With the standalone installed that `or` adopted the
+--! neighbour's table and every assignment below overwrote a key of THEIRS -- the opposite of what
+--! rule 3 asks. Ours is published through Private.Publish at the bottom instead: TSM reads ours, the
+--! neighbour keeps theirs, and a name nobody has claimed still lands in _G.
+local C_Item = {}
 
 function C_Item.IsItemDataCachedByID(ItemInfo)
 	local _, Cached = C_Item.GetItemInfo(ItemInfo)
@@ -166,10 +175,12 @@ function C_Item.IsBound(ItemLocation)
 		Tooltip:SetBagItem(ItemLocation.bagID, ItemLocation.slotIndex)
 	end
 
-	local Line = _G["CAPI_ScanTooltipTextLeft2"]
-	if ( Line ) then
-		return Line:GetText() == ITEM_SOULBOUND
-	end
+	--! WotLK fix: NumLines() first -- see C_Container.GetContainerItemInfo. The old `if Line` was
+	--! never the guard it looked like: the font string exists whether or not the tooltip counts it
+	--! (run 14: numLines == 1, TextLeft2 present). Returns a boolean, never nil -- retail's
+	--! C_Item.IsBound answers boolean, and a nil answer is a type error in a boolean DB field.
+	local Line = Tooltip:NumLines() >= 2 and _G[TOOLTIP_LINE_2] or nil
+	return Line ~= nil and Line:GetText() == ITEM_SOULBOUND
 end
 
 C_Item.DoesItemExist = C_Item.GetItemID
@@ -181,7 +192,17 @@ C_Item.LockItemByGUID = Private.Void
 C_Item.UnlockItemByGUID = Private.Void
 
 -- Global
-_G.C_Item = C_Item
-_G.GetItemInfoInstant = C_Item.GetItemInfoInstant
-_G.GetItemSubClassInfo = C_Item.GetItemSubClassInfo
-_G.GetItemInventorySlotInfo = C_Item.GetItemInventorySlotInfo
+--! WotLK fix: Publish instead of a straight `_G.C_Item = C_Item`. Where nobody has the name we take
+--! it as before; where the standalone already has it we only add the keys it lacks, and TSM reads ours
+--! through Private.C_Item. The three loose names below get the same treatment by hand -- none of them
+--! exists on 3.3.5a (codex: NO for all three), so the only owner they can have is a neighbour's copy.
+Private.Publish("C_Item", C_Item)
+if ( _G.GetItemInfoInstant == nil ) then
+	_G.GetItemInfoInstant = C_Item.GetItemInfoInstant
+end
+if ( _G.GetItemSubClassInfo == nil ) then
+	_G.GetItemSubClassInfo = C_Item.GetItemSubClassInfo
+end
+if ( _G.GetItemInventorySlotInfo == nil ) then
+	_G.GetItemInventorySlotInfo = C_Item.GetItemInventorySlotInfo
+end

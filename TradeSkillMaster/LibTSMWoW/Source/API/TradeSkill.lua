@@ -12,6 +12,12 @@ local ClientInfo = LibTSMWoW:Include("Util.ClientInfo")
 local Item = LibTSMWoW:Include("API.Item")
 local Container = LibTSMWoW:Include("API.Container")
 local EnumType = LibTSMWoW:From("LibTSMUtil"):Include("BaseType.EnumType")
+--! WotLK fix: read the compat layer's C_Item, not the global. With the standalone !!!ClassicAPI
+--! addon installed the global belongs to it and its copy lacks this backport's fixes; the layer keeps
+--! ours in __TSM_ClassicAPI_Private. Falls back to the global, so a stripped-down install still works.
+--! Why the layer stopped handing the name over: Compat/ClassicAPI/Util/_Prelude.lua.
+local C_Item = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.C_Item or C_Item
+
 local private = {
 	buggedQuantityRangeSpells = {},
 	categoryRootCache = {

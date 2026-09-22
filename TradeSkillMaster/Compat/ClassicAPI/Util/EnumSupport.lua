@@ -1,5 +1,7 @@
-if __TSM_ClassicAPI_SKIP then return end
-local Enum = Enum
+--! WotLK fix: no SKIP guard, and write into OUR Enum instead of _G. This file defines
+--! Enum.__ItemClassInfo, which TSM's own logic reads, and _Prelude's rule is that such a file must not
+--! be guarded. Private.Enum is the same table as _G.Enum when nothing else owns the name.
+local Enum = __TSM_ClassicAPI_Private.Enum
 
 -- These are used by internal functions, etc.
 -- TODO: Certain strings need to be localized.

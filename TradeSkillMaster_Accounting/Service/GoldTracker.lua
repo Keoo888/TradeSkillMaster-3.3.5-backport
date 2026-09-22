@@ -198,7 +198,16 @@ function private.LoadCharacterGoldLog(characterKey, data, lastUpdate)
 	assert(not private.characterLog[characterKey])
 	local log = GoldLog.Load(data)
 	if not log then
-		Log.Err("Failed to decode (%s, %d)", characterKey, #data)
+		--! WotLK fix: the "goldLog" setting defaults to "" (LibTSMSystem AddonSettings/Schema.lua),
+		--! and CSV.DecodeStart() rejects an empty string because it has no header row, so every
+		--! character that has never logged gold reaches here and printed one [ERR] line at login.
+		--! Measured on the 2026-09-06 run: five [ERR] "Failed to decode (<char>, 0)" for five alts.
+		--! The two sibling call sites treat the same state as normal (`GoldLog.Load(data) or
+		--! GoldLog.New()`), so only this one shouted. A non-empty string that fails to decode is
+		--! still a real failure and is still logged.
+		if data ~= "" then
+			Log.Err("Failed to decode (%s, %d)", characterKey, #data)
+		end
 		private.characterLog[characterKey] = GoldLog.New()
 		return
 	end

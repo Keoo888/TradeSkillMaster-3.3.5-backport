@@ -279,13 +279,10 @@ function TSM.OnInitialize(settingsDB)
 			-- устойчивая цена; молчаливая подмена на minBuyout (самую манипулируемую
 			-- цену) превращала операции вида 0.5*dbmarket в 0.5*minBuyout и
 			-- провоцировала гонку на дно для несканированных предметов.
-			-- 3.3.5 финальный fallback: если нет auction data вообще, используем vendorsell * 2
-			if not value and (key == "marketValue" or key == "regionMarketValue") then
-				local vendorSell = ItemInfo.GetVendorSell(itemString)
-				if vendorSell and vendorSell > 0 then
-					value = vendorSell * 2
-				end
-			end
+			--! WotLK fix: no vendorsell*2 fallback for marketValue. An unscanned item
+			--! must report "no data" (like retail), not a fabricated price: every
+			--! uncraftable item priced at exactly twice vendor sell. Players who want
+			--! that behaviour can write it explicitly as `vendorsell * 2`.
 			return value
 		end
 	end

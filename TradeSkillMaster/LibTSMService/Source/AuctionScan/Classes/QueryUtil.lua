@@ -161,17 +161,34 @@ function private.GenerateClassicQueriesThreaded(itemList, callback)
 		Threading.Yield()
 	end
 
-	local candidates = TempTable.Acquire()
+	--! WotLK perf: ask the item cache once for every word instead of once per
+	--! word. `Contains` can't use an index, so each call was a full scan; nine
+	--! of them ran back to back with no yield and stalled the frame (measured
+	--! 914 ms per auction scan, worst frame 326 ms).
+	local words = TempTable.Acquire()
+	local wordItemCount = TempTable.Acquire()
 	for word, items in pairs(wordToItems) do
 		local itemCount = 0
 		for _ in pairs(items) do
 			itemCount = itemCount + 1
 		end
-		if itemCount >= MERGE_MIN_ITEMS
-			and ItemInfo.CountNamesContaining(word, MERGE_MAX_DB_NAME_MATCHES + 1) <= MERGE_MAX_DB_NAME_MATCHES then
-			tinsert(candidates, { word = word, items = items, count = itemCount, len = #word })
+		if itemCount >= MERGE_MIN_ITEMS then
+			tinsert(words, word)
+			wordItemCount[word] = itemCount
 		end
+		Threading.Yield()
 	end
+	local nameMatches = ItemInfo.CountNamesContainingBatch(words, MERGE_MAX_DB_NAME_MATCHES + 1, Threading.Yield)
+
+	local candidates = TempTable.Acquire()
+	for _, word in ipairs(words) do
+		if nameMatches[word] <= MERGE_MAX_DB_NAME_MATCHES then
+			tinsert(candidates, { word = word, items = wordToItems[word], count = wordItemCount[word], len = #word })
+		end
+		Threading.Yield()
+	end
+	TempTable.Release(words)
+	TempTable.Release(wordItemCount)
 	sort(candidates, private.MergeCandidateSortHelper)
 
 	for _, candidate in ipairs(candidates) do

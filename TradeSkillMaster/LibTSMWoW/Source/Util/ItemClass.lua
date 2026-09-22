@@ -7,6 +7,16 @@
 local LibTSMWoW = select(2, ...).LibTSMWoW
 local ItemClass = LibTSMWoW:Init("Util.ItemClass")
 local ClientInfo = LibTSMWoW:Include("Util.ClientInfo")
+--! WotLK fix: read the compat layer's C_Item, not the global. With the standalone !!!ClassicAPI
+--! addon installed the global belongs to it and its copy lacks this backport's fixes; the layer keeps
+--! ours in __TSM_ClassicAPI_Private. Falls back to the global, so a stripped-down install still works.
+--! Why the layer stopped handing the name over: Compat/ClassicAPI/Util/_Prelude.lua.
+local C_Item = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.C_Item or C_Item
+--! WotLK fix: same for Enum -- the class ids below are correctness-critical and a neighbour addon
+--! owning _G.Enum can publish auction-category ids instead (Weapon=1, Armor=2), which turns every
+--! comparison in this file silently false.
+local Enum = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.Enum or Enum
+
 local private = {
 	classes = {},
 	subClasses = {},

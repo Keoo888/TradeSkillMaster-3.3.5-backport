@@ -277,22 +277,12 @@ function TabardFrame_Open()
 	_G.TabardFrame_OnEvent(_G["TabardFrame"], "OPEN_TABARD_FRAME")
 end
 
-function MailFrame_Show()
-	-- Replay the native 3.3.5 MAIL_SHOW initialization without its OpenBackpack()
-	-- side effect. Bag replacement addons hook that global and may fail while the
-	-- TSM mailing FSM is restoring the default mail UI.
-	_G.ShowUIPanel(_G.MailFrame)
-	if not _G.MailFrame:IsShown() then
-		_G.CloseMail()
-		return
-	end
-	if _G.IsInGuild() and _G.GetNumGuildMembers() == 0 then
-		_G.GuildRoster()
-	end
-	_G.SendMailFrame_Update()
-	_G.MailFrameTab_OnClick(nil, 1)
-	_G.CheckInbox()
-end
+--! WotLK fix: MailFrame_Show moved out of this file to Compat/WrathBootstrap.lua. The version here
+--! replaced the standalone !!!ClassicAPI addon's own `MailFrame_OnEvent(MailFrame, "MAIL_SHOW")` with a
+--! replay that leaves out its OpenBackpack() -- but this file still opts out when that addon is
+--! installed, so exactly when the fix was needed it was not loaded, and the player's bags flew open
+--! every time TSM handed the mail window back to the default UI. WrathBootstrap always runs, keeps the
+--! implementation private for TSM's own call site, and only fills the loose global when nobody owns it.
 
 function MailFrame_Hide()
 	_G.MailFrame_OnEvent(_G["MailFrame"], "MAIL_CLOSED")

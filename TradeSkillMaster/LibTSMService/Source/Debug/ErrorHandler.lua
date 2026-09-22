@@ -17,6 +17,12 @@ local String = LibTSMService:From("LibTSMUtil"):Include("Lua.String")
 local JSON = LibTSMService:From("LibTSMUtil"):Include("Format.JSON")
 local TempTable = LibTSMService:From("LibTSMUtil"):Include("BaseType.TempTable")
 local ObjectPool = LibTSMService:From("LibTSMUtil"):IncludeClassType("ObjectPool")
+--! WotLK fix: read the compat layer's C_Timer, not the global. With the standalone !!!ClassicAPI
+--! addon installed the global belongs to it and its copy lacks this backport's fixes; the layer keeps
+--! ours in __TSM_ClassicAPI_Private. Falls back to the global, so a stripped-down install still works.
+--! Why the layer stopped handing the name over: Compat/ClassicAPI/Util/_Prelude.lua.
+local C_Timer = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.C_Timer or C_Timer
+
 local private = {
 	uiShowFunc = nil,
 	uiHideFunc = nil,
@@ -138,7 +144,19 @@ function private.ErrorHandler(msg, thread, isSilent, isManual)
 
 	-- Shorten the paths in the error message
 	msg = gsub(msg, "%.%.%.T?r?a?d?e?S?k?i?l?l?M?a?ster([_A-Za-z]*[\\/])", "TradeSkillMaster%1")
-	msg = strsub(msg, strfind(msg, "TradeSkillMaster") or 1)
+	--! WotLK fix: was `msg = strsub(msg, strfind(msg, "TradeSkillMaster") or 1)`, which cut away
+	--! everything before the first "TradeSkillMaster" in the message. That is a no-op for an error
+	--! raised inside TSM itself (the first occurrence is already in the leading "file:line:" part),
+	--! but destructive for anything else, because with !BugGrabber installed this handler is not fed
+	--! the bare error at all: BugGrabber neuters the global seterrorhandler (BugGrabber.lua:658), so
+	--! Debug.SetErrorHandler() is dead and the live path is the BugGrabber_BugGrabbed callback at the
+	--! bottom of this file, which passes errObj.message -- the error text PLUS the whole traceback,
+	--! many lines. When the error comes from a foreign file the first "TradeSkillMaster" sits in a
+	--! traceback line, so the cut threw away the error text itself. Measured on the 2026-09-06 run:
+	--! the report read "TSM\Compat\ClassicAPI\Util\C_Timer.lua:33: in function <...>:" and nothing
+	--! after the colon, while !BugGrabber held the full three-line message. Dropping the
+	--! Interface\AddOns\ prefix shortens TSM's own paths the same way and loses nobody else's text.
+	msg = gsub(msg, "[Ii]nterface\\[Aa]dd[Oo]ns\\", "")
 	msg = gsub(msg, "TradeSkillMaster([^%.])", "TSM%1")
 
 	-- Build our global name translation table
@@ -337,7 +355,13 @@ function private.GetStackInfo(msg, thread)
 		end
 	end
 	if not startIndex then
-		return {}
+		--! WotLK fix: was a bare `return {}`, which dropped the second return value, so the caller's
+		--! `msg = newMsg` set msg to nil. For a normal error that is invisible (the caller bails out at
+		--! `addonName ~= "TradeSkillMaster"`), but for a thread error or a manual error addonName is
+		--! preset to "TradeSkillMaster", so execution continued with msg == nil and reached
+		--! Log.Err("%s", msg) -- and string.format("%s", nil) is a hard error in Lua 5.1. That would
+		--! raise an error from inside the error handler, on the ShowForThread() path which has no pcall.
+		return {}, msg
 	end
 
 	-- Remove the extra frames from the top

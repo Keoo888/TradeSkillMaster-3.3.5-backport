@@ -25,6 +25,13 @@ local private = {
 	showTimer = nil,
 }
 local MIN_FRAME_SIZE = { width = 575, height = 400 }
+--! WotLK fix: read the compat layer's private MailFrame_Show, not the loose global. There is no such
+--! function in FrameXML 3.3.5a -- it comes from ClassicAPI, and the standalone !!!ClassicAPI addon's
+--! version replays MAIL_SHOW through MailFrame_OnEvent, which calls OpenBackpack(): with that addon
+--! installed the player's bags flew open every time this state handed the window back to the default UI.
+--! The private copy (Compat/WrathBootstrap.lua) leaves OpenBackpack out. Resolved at load time, which is
+--! safe here: this addon declares `## Dependency: TradeSkillMaster`, so the whole compat layer has run.
+local MailFrameShow = (_G.__TSM_ClassicAPI_Private and _G.__TSM_ClassicAPI_Private.MailFrameShow) or _G.MailFrame_Show
 
 
 
@@ -157,7 +164,7 @@ function private.FSMCreate()
 				if ClientInfo.IsRetail() then
 					ShowUIPanel(MailFrame)
 				else
-					MailFrame_Show()
+					MailFrameShow()
 				end
 
 				if not private.defaultUISwitchBtn then

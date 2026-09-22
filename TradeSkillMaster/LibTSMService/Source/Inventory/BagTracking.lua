@@ -470,8 +470,13 @@ function private.HandleLogin()
 	query:Release()
 	private.quantityDB:SetQueryUpdatesPaused(false)
 
-	-- WoW does not fire an update event for the backpack when you log in, so trigger one
-	private.BagUpdateHandler(nil, 0)
+	--! WotLK fix: queue every bag, not just the backpack. This handler zeroes bagQuantity for every row
+	--! above, and 3.3.5a does not reliably fire a login BAG_UPDATE for bags 1-4, so their contents stayed
+	--! at zero until something else touched them -- the real reason Destroying and the craftable counts
+	--! only woke up after opening a profession window. The delayed handler retries bags that fail.
+	for bag = Container.GetBackpackContainer(), Container.GetNumBags() do
+		private.BagUpdateHandler(nil, bag)
+	end
 	private.BagUpdateDelayedHandler()
 	return true
 end

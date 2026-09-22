@@ -12,6 +12,9 @@ local ChatMessage = TSM.LibTSMService:Include("UI.ChatMessage")
 local Threading = TSM.LibTSMTypes:Include("Threading")
 local ItemInfo = TSM.LibTSMService:Include("Item.ItemInfo")
 local ItemString = TSM.LibTSMTypes:Include("Item.ItemString")
+--! WotLK fix: read the compat layer's Enum, not the global. A neighbour addon owning _G.Enum can
+--! publish auction-category class ids (Weapon=1, Armor=2), which empties this search with no error.
+local Enum = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.Enum or Enum
 local ClientInfo = TSM.LibTSMWoW:Include("Util.ClientInfo")
 local AuctionHouse = TSM.LibTSMWoW:Include("API.AuctionHouse")
 local Event = TSM.LibTSMWoW:Include("Service.Event")
@@ -47,6 +50,12 @@ local NATIVE_PAGE_TIMEOUT = 30
 local NATIVE_THROTTLE_MAX_WAIT = 30
 local NATIVE_MIN_MISSING_FOR_RETRY = 15
 local NATIVE_MAX_PAGE_RETRIES = 1
+
+--! WotLK fix: read the compat layer's C_Timer, not the global. With the standalone !!!ClassicAPI
+--! addon installed the global belongs to it and its copy lacks this backport's fixes; the layer keeps
+--! ours in __TSM_ClassicAPI_Private. Falls back to the global, so a stripped-down install still works.
+--! Why the layer stopped handing the name over: Compat/ClassicAPI/Util/_Prelude.lua.
+local C_Timer = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.C_Timer or C_Timer
 
 local private = {
 	settings = nil,

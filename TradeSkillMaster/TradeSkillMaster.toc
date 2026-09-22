@@ -20,8 +20,10 @@
 ## X-Embeds: Ace3, LibDataBroker-1.1, LibDBIcon-1.0, LibRealmInfo, LibDeflate, LibSerialize, LibAHTab
 
 # Bundled Classic API polyfill (self-contained; replaces the former hard !!!ClassicAPI dependency).
-# Must load before WrathBootstrap, which patches/extends it. All shims are define-if-missing, so when
-# the external !!!ClassicAPI addon is present (e.g. for Clique/TPT) it loads first and this copy is inert.
+# Must load before WrathBootstrap, which patches/extends it. When the external !!!ClassicAPI addon is
+# present (e.g. for Clique/TPT) it loads first and keeps its globals; this copy no longer goes inert
+# because of that — the files carrying backport fixes load either way and TSM reads them privately.
+# See Compat\ClassicAPI\Util\_Prelude.lua.
 Compat\ClassicAPI\Lib\Load.xml
 Compat\ClassicAPI\Load.xml
 

@@ -7,6 +7,11 @@ local GetSpellInfo = GetSpellInfo
 local GetSpellTexture = GetSpellTexture
 
 local Tooltip = Private.Tooltip
+--! WotLK fix: the last line of the scan tooltip, addressed by name. The name used to be hardcoded as
+--! "CAPI_ScanTooltip..." here; the frame was renamed in _Prelude.lua (it now has to coexist with the
+--! standalone addon's frame of the old name), and a hardcoded old name would read a font string that
+--! belongs to nobody -- nil, then `:GetText()` on nil. Prefix built once, index appended per call.
+local TOOLTIP_LINE_PREFIX = Private.TooltipName.."TextLeft"
 local EventHandler = Private.EventHandler
 local EventHandler_Fire = EventHandler.Fire
 
@@ -26,7 +31,7 @@ function C_Spell.GetSpellDescription(ID)
 
 	local Num = Tooltip:NumLines()
 	if ( Num > 0 ) then
-		return _G["CAPI_ScanTooltipTextLeft"..Num]:GetText()
+		return _G[TOOLTIP_LINE_PREFIX..Num]:GetText()
 	end
 end
 

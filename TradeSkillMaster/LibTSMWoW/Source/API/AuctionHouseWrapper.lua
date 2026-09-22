@@ -12,6 +12,9 @@ local DelayTimer = LibTSMWoW:IncludeClassType("DelayTimer")
 local Event = LibTSMWoW:Include("Service.Event")
 local DefaultUI = LibTSMWoW:Include("UI.DefaultUI")
 local ClientInfo = LibTSMWoW:Include("Util.ClientInfo")
+--! WotLK fix: read the compat layer's Enum, not the global. A neighbour addon owning _G.Enum can
+--! publish auction-category class ids (Weapon=1, Armor=2), which silently misfiles every query below.
+local Enum = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.Enum or Enum
 local Future = LibTSMWoW:From("LibTSMUtil"):IncludeClassType("Future")
 local DebugStack = LibTSMWoW:From("LibTSMUtil"):Include("Lua.DebugStack")
 local Math = LibTSMWoW:From("LibTSMUtil"):Include("Lua.Math")
@@ -20,6 +23,12 @@ local Vararg = LibTSMWoW:From("LibTSMUtil"):Include("Lua.Vararg")
 local Analytics = LibTSMWoW:From("LibTSMUtil"):Include("Util.Analytics")
 local Log = LibTSMWoW:From("LibTSMUtil"):Include("Util.Log")
 local APIWrapper = LibTSMWoW:DefineClassType("AuctionAPIWrapper")
+--! WotLK fix: read the compat layer's C_Item, not the global. With the standalone !!!ClassicAPI
+--! addon installed the global belongs to it and its copy lacks this backport's fixes; the layer keeps
+--! ours in __TSM_ClassicAPI_Private. Falls back to the global, so a stripped-down install still works.
+--! Why the layer stopped handing the name over: Compat/ClassicAPI/Util/_Prelude.lua.
+local C_Item = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.C_Item or C_Item
+
 local private = {
 	wrappers = {}, ---@type table<string,AuctionAPIWrapper>
 	events = {},

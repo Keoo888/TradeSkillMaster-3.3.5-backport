@@ -214,6 +214,40 @@ function ItemInfo.CountNamesContaining(word, maxCount)
 	return count
 end
 
+--! WotLK perf: batch form of the above. `Contains` is never indexable, so each
+--! single-word call is a full scan of the item cache (measured 101.6 ms/call,
+--! 9 calls per auction scan). One pass answers every word at once.
+---Count, for each word, how many cached item names contain it (case-insensitive).
+---@param words string[] The substrings to match
+---@param maxCount number Stop counting a given word past this many matches
+---@param yieldFunc? fun() Called periodically so a thread can yield
+---@return table<string, number>
+function ItemInfo.CountNamesContainingBatch(words, maxCount, yieldFunc)
+	local counts = {}
+	local numWords = #words
+	for i = 1, numWords do
+		counts[words[i]] = 0
+	end
+	local rows = 0
+	local query = private.cache:NewQuery()
+		:Select("name")
+	for _, name in query:Iterator() do
+		local nameLower = strlower(name)
+		for i = 1, numWords do
+			local word = words[i]
+			if counts[word] <= maxCount and strfind(nameLower, word, 1, true) then
+				counts[word] = counts[word] + 1
+			end
+		end
+		rows = rows + 1
+		if yieldFunc and rows % 500 == 0 then
+			yieldFunc()
+		end
+	end
+	query:Release()
+	return counts
+end
+
 ---Get the name.
 ---@param item string The item
 ---@return string?

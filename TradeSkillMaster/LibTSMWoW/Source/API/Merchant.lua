@@ -58,16 +58,11 @@ end
 ---Gets the max stack size that can be bought of an item.
 ---@return number
 function Merchant.GetItemMaxStack(index)
-	-- 3.3.5: GetMerchantItemMaxStack возвращает 1 для патронов/реагентов (нет понятия "max stack purchase").
-	-- Fallback на stackSize из GetMerchantItemInfo — реальный размер пачки за одну покупку.
-	local maxStack = GetMerchantItemMaxStack(index)
-	if (not maxStack or maxStack <= 1) and not ClientInfo.HasFeature(ClientInfo.FEATURES.C_MERCHANTFRAME) then
-		local _, _, _, stackSize = GetMerchantItemInfo(index)
-		if stackSize and stackSize > 1 then
-			return stackSize
-		end
-	end
-	return maxStack or 1
+	--! WotLK fix: no stackSize fallback. Run 20 measured the native answering 20 and 10 for reagents,
+	--! and stackSize is the merchant BATCH size, not a purchase cap; returning it from a function named
+	--! MaxStack is the confusion behind the drip-buying bug Vendor/Classes/Buy.lua fixed by reading the
+	--! batch size explicitly.
+	return GetMerchantItemMaxStack(index) or 1
 end
 
 ---Gets the number of extended cost items.

@@ -7,6 +7,16 @@
 local LibTSMWoW = select(2, ...).LibTSMWoW
 local Item = LibTSMWoW:Init("API.Item")
 local ItemClass = LibTSMWoW:Include("Util.ItemClass")
+--! WotLK fix: read the compat layer's C_Item, not the global. With the standalone !!!ClassicAPI
+--! addon installed the global belongs to it and its copy lacks this backport's fixes; the layer keeps
+--! ours in __TSM_ClassicAPI_Private. Falls back to the global, so a stripped-down install still works.
+--! Why the layer stopped handing the name over: Compat/ClassicAPI/Util/_Prelude.lua.
+local C_Item = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.C_Item or C_Item
+--! WotLK fix: same for Enum -- IsClassDisenchantable and friends compare against Enum.ItemClass, and
+--! a neighbour addon owning _G.Enum can publish auction-category ids (Weapon=1, Armor=2, no
+--! Profession), which made every item look non-disenchantable with no error anywhere.
+local Enum = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.Enum or Enum
+
 local private = {
 	cacheTooltip = nil,
 	cacheRequestTimes = {},

@@ -386,3 +386,10 @@ end
 _G.Item = Item
 _G.ItemMixin = ItemMixin
 _G.ItemEventListener = ItemEventListener
+--! WotLK fix: also hand the listener to Private, because ClassicAPI.lua's PLAYER_ENTERING_WORLD
+--! bootstrap now starts OURS by name instead of whatever sits in the global. Init() deletes itself
+--! (`self.Init = nil` above), so calling it on the standalone's already-started listener would be
+--! "attempt to call method 'Init' (a nil value)". This file still opts out when the standalone is
+--! installed, so under coexistence Private.ItemEventListener stays nil and the bootstrap does nothing
+--! -- which is correct: their listener is already running.
+Private.ItemEventListener = ItemEventListener

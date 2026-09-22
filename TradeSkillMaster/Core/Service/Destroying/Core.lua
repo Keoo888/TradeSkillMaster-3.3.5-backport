@@ -27,6 +27,10 @@ local CustomString = TSM.LibTSMTypes:Include("CustomString")
 local Conversions = TSM.LibTSMApp:Include("Service.Conversions")
 local BagTracking = TSM.LibTSMService:Include("Inventory.BagTracking")
 local DelayTimer = TSM.LibTSMWoW:IncludeClassType("DelayTimer")
+--! WotLK fix: read the compat layer's Enum, not the global. A neighbour addon owning _G.Enum can
+--! publish auction-category class ids (Weapon=1, Armor=2), and the Tradegoods checks below then match
+--! nothing -- milling and prospecting go quiet with no error.
+local Enum = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.Enum or Enum
 local private = {
 	bagUpdateTimer = nil,
 	combineThread = nil,
@@ -653,9 +657,15 @@ function private.IsDestroyable(itemString)
 	-- Disenchanting
 	if quality and ItemInfo.IsDisenchantable(itemString) and quality <= private.settings.deMaxQuality then
 		local hasSourceItem = true
+		--! WotLK fix: track whether the answer below rests on data that has not arrived yet. Checked
+		--! after the loop; skillPending separates "profession not scanned yet" from "no Enchanting",
+		--! so a non-enchanter still gets the negative cached and keeps the perf win above.
+		local inputsIncomplete = false
 		if ClientInfo.IsPandaClassic() or ClientInfo.IsBCClassic() or ClientInfo.IsWrathClassic() then
 			local classId = ItemInfo.GetClassId(itemString)
 			local itemLevel = ItemInfo.GetItemLevel(ItemString.GetBase(itemString))
+			local skillPending = private.disenchantSkillLevel == nil and IsSpellKnown(SPELL_IDS.disenchant) and true or false
+			inputsIncomplete = classId == nil or itemLevel == nil or skillPending
 			hasSourceItem = false
 			for targetItemString in Conversion.DisenchantTargetItemIterator() do
 				local _, _, _, _, skillRequired = Conversions.GetDisenchantTargetItemSourceInfo(targetItemString, classId, quality, itemLevel)
@@ -670,6 +680,13 @@ function private.IsDestroyable(itemString)
 			return private.canDestroyCache[itemString], private.destroyQuantityCache[itemString]
 		end
 		-- Кэшируем негативный результат (нет подходящей конверсии по скиллу)
+		--! WotLK fix: but never a negative built on missing data. A transient nil itemLevel/classId
+		--! (item data still in flight) or an unscanned Enchanting skill fails every range check above,
+		--! and the item was then marked non-disenchantable until the next relog -- the "open the
+		--! Enchanting window first" workaround. Returning nil re-evaluates on the next bag update.
+		if inputsIncomplete then
+			return nil, nil
+		end
 		private.canDestroyCache[itemString] = false
 		private.destroyQuantityCache[itemString] = nil
 		return private.canDestroyCache[itemString], private.destroyQuantityCache[itemString]

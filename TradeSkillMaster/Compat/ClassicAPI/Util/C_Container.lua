@@ -1,13 +1,19 @@
-if __TSM_ClassicAPI_SKIP then return end
+--! WotLK fix: no SKIP guard -- GetContainerItemInfo below carries the sixth-native-return fix, and
+--! opting the file out when the standalone !!!ClassicAPI addon is installed handed TSM the unfixed
+--! answer back (hasLoot hardcoded to false). See _Prelude.lua for the whole picture.
 local Private = __TSM_ClassicAPI_Private
 
 local _G = _G
 local ITEM_SOULBOUND = ITEM_SOULBOUND
 local GetContainerItemInfo = GetContainerItemInfo
 
-local C_Container = C_Container or {}
+--! WotLK fix: a fresh table, not `C_Container or {}` -- that `or` adopted the neighbour's table and
+--! wrote our keys over theirs. Published through Private.Publish at the bottom instead.
+local C_Container = {}
 
 local Tooltip = Private.Tooltip
+-- The scan tooltip's second line, addressed by name (FrameXML GameTooltip.lua:126). Built once.
+local TOOLTIP_LINE_2 = Private.TooltipName.."TextLeft2"
 
 function C_Container.GetContainerItemInfo(ContainerIndex, SlotIndex)
 	--! WotLK fix: the sixth native return, `lootable`, was being dropped and hasLoot hardcoded to
@@ -19,7 +25,10 @@ function C_Container.GetContainerItemInfo(ContainerIndex, SlotIndex)
 	if ( Icon ) then
 		Tooltip:ClearLines()
 		Tooltip:SetBagItem(ContainerIndex, SlotIndex)
-		local Line = _G["CAPI_ScanTooltipTextLeft2"]
+		--! WotLK fix: NumLines() first. Run 14 measured numLines == 1 on our template-less scan tooltip
+		--! while _G[...TextLeft2] existed -- a named font string the tooltip does not count is not a
+		--! line, and its text belongs to whatever was set before (TSM-028).
+		local Line = Tooltip:NumLines() >= 2 and _G[TOOLTIP_LINE_2] or nil
 
 		return {
 			iconFileID = Icon,
@@ -32,7 +41,9 @@ function C_Container.GetContainerItemInfo(ContainerIndex, SlotIndex)
 			isFiltered = false,
 			hasNoValue = false,
 			itemID = C_Container.GetContainerItemID(ContainerIndex, SlotIndex),
-			isBound = Line and Line:GetText() == ITEM_SOULBOUND
+			--! WotLK fix: `Line ~= nil and`, not `Line and` -- BagTracking declares isBound as a boolean
+			--! field, and a nil Line made the whole `and` chain nil, which Table.lua rejects by type.
+			isBound = Line ~= nil and Line:GetText() == ITEM_SOULBOUND
 		}
 	end
 end
@@ -100,5 +111,9 @@ C_Container.GetContainerItemPurchaseCurrency
 ]]
 
 -- Global
-_G.C_Container = C_Container
-_G.C_GetContainerItemInfo = C_Container.GetContainerItemInfo
+--! WotLK fix: Publish rather than a straight assignment, and the loose alias is fill-only -- see the
+--! bottom of C_Item.lua for the same shape and the reason.
+Private.Publish("C_Container", C_Container)
+if ( _G.C_GetContainerItemInfo == nil ) then
+	_G.C_GetContainerItemInfo = C_Container.GetContainerItemInfo
+end

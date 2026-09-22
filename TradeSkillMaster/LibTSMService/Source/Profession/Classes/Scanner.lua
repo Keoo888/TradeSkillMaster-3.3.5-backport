@@ -513,6 +513,11 @@ function private.ScanProfession()
 		return
 	elseif LibTSMService.GetTime() < private.ignoreUpdatesUntil then
 		private.DbgChatTrace("scan skipped: ignoring updates for %.1fs", private.ignoreUpdatesUntil - LibTSMService.GetTime())
+		--! WotLK fix: re-arm instead of dropping the request. The 1s window opens the moment a craft
+		--! finishes and the game's own trade-skill update lands inside it, so the scan was thrown away
+		--! and the skill level stayed stale until the window was closed and reopened. Safe to re-arm
+		--! from here: DelayTimer clears the timer before calling us (DelayTimer.lua:102-106).
+		private.scanTimer:RunForTime(private.ignoreUpdatesUntil - LibTSMService.GetTime() + 0.1)
 		return
 	end
 

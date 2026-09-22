@@ -32,6 +32,7 @@ local private = {
 	preparedSpellId = nil,
 	preparedTime = 0,
 	timeoutTimer = nil,
+	postCraftBagTimer = nil,
 	optionalMatTable = {},
 	unusedOptionalMatTempTables = {},
 }
@@ -44,6 +45,11 @@ local private = {
 
 function ProfessionUtil.OnInitialize()
 	private.timeoutTimer = DelayTimer.New("PROFESSION_UTIL_TIMEOUT", private.CraftTimeoutMonitor)
+	--! WotLK fix: 3.3.5a does not reliably fire BAG_UPDATE for bags 1-4, so mats consumed from them
+	--! left the craftable count stale until the window was reopened. Rescan shortly after each craft
+	--! (not immediately -- the server has not removed the mats at UNIT_SPELLCAST_SUCCEEDED yet);
+	--! DelayTimer ignores a re-arm while running, so queue-crafting coalesces into one rescan.
+	private.postCraftBagTimer = DelayTimer.New("PROFESSION_UTIL_POST_CRAFT_BAGS", BagTracking.RescanAllBags)
 	Event.Register("UNIT_SPELLCAST_SUCCEEDED", function(_, unit, spellNameOrGUID, rankOrNil, spellIdOrNil)
 		-- 3.3.5: (unit, spellName, spellRank, lineID); retail: (unit, castGUID, spellID)
 		local spellId = ClientInfo.IsRetail() and rankOrNil or spellNameOrGUID
@@ -69,8 +75,9 @@ function ProfessionUtil.OnInitialize()
 					end
 				end
 			end
+		else
+			private.postCraftBagTimer:RunForTime(0.3)
 		end
-
 		local callback = private.craftCallback
 		if not callback then return end
 		private.craftQuantity = private.craftQuantity - 1

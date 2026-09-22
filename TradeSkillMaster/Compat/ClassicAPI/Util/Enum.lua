@@ -1,5 +1,12 @@
-if __TSM_ClassicAPI_SKIP then return end
-local Enum = Enum or {}
+--! WotLK fix: no SKIP guard. TSM reads Enum.ItemClass alone 98 times; opting this file out when the
+--! standalone !!!ClassicAPI is installed handed every one of those to whatever addon happened to own
+--! _G.Enum, and a neighbour publishing auction-category ids (Weapon=1, Armor=2, no Profession) turned
+--! each check silently false -- no error, just nothing disenchantable. See _Prelude.lua.
+local Private = __TSM_ClassicAPI_Private
+
+--! WotLK fix: a fresh table, not `Enum or {}` -- that `or` adopted a neighbour's table and the
+--! assignments below overwrote THEIR keys. Ours is published through Private.Publish at the bottom.
+local Enum = {}
 
 -- "Meta" tables haven't been added (MinValue, NumValues, MaxValue)
 -- TODO: Certain tables have outdated information.
@@ -417,4 +424,6 @@ Enum.MountType = {
 Enum.SeasonID = Enum.SeasonID or {}
 
 -- Global
-_G.Enum = Enum
+--! WotLK fix: was `_G.Enum = Enum`, a wholesale replace of a neighbour's table. Publish gap-fills
+--! _G.Enum instead and keeps ours in Private.Enum, which is what TSM's own readers alias.
+Private.Publish("Enum", Enum)

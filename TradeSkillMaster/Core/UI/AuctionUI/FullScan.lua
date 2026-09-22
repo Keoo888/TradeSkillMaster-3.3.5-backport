@@ -19,6 +19,12 @@ local DefaultUI = TSM.LibTSMWoW:Include("UI.DefaultUI")
 local ItemString = TSM.LibTSMTypes:Include("Item.ItemString")
 local ScanUtil = TSM.LibTSMService:Include("AuctionScan.Util")
 local L = TSM.Locale.GetTable()
+--! WotLK fix: read the compat layer's C_Timer, not the global. With the standalone !!!ClassicAPI
+--! addon installed the global belongs to it and its copy lacks this backport's fixes; the layer keeps
+--! ours in __TSM_ClassicAPI_Private. Falls back to the global, so a stripped-down install still works.
+--! Why the layer stopped handing the name over: Compat/ClassicAPI/Util/_Prelude.lua.
+local C_Timer = __TSM_ClassicAPI_Private and __TSM_ClassicAPI_Private.C_Timer or C_Timer
+
 local private = {
 	frame = nil,
 	scanState = nil, -- nil | "querying" | "processing" | "paged" | "done"
@@ -54,11 +60,26 @@ local MIN_MISSING_FOR_RETRY = 15 -- добор включаем только е�
 -- той же страницы (с лимитом, чтобы не зациклиться на постоянно echo-ящем сервере).
 local MAX_DUP_REQUERIES = 3 -- повторов той же страницы при real echo
 local DUP_REQUERY_DELAY = 0.5 -- пауза перед повтором echo-страницы
+--! WotLK fix: 3.3.5a fires AUCTION_ITEM_LIST_UPDATE before the local "list" buffer
+--! swaps to the requested page, so an identical page is often just a late swap, not a
+--! server echo. Poll the buffer locally first; re-query only if it never swaps.
+local STALE_POLL_TIMEOUT = 1.5 -- seconds to wait for the local list to swap
+local STALE_POLL_STEP = 0.1 -- local re-read interval, costs no server round-trip
 -- Транзиентный пустой батч в середине скана: не считаем концом АХ, повторяем страницу.
 local MAX_EMPTY_PAGE_RETRIES = 2 -- повторов пустой страницы до принудительного финиша
 local EMPTY_PAGE_RETRY_DELAY = 1 -- пауза перед повтором пустой страницы
 local DEBUG_LOG_EVERY_N_PAGES = 0 -- частота snapshot-сообщений в чат
 local DEBUG_LOG_RETRIES = false -- логировать каждый page retry в чат
+--! WotLK perf: post-getAll processing used a fixed 200 auctions per 0.02s tick, so a 55k
+--! dump spent 5.5s of its 11.2s asleep while frames averaged 10ms -- idle, not busy.
+--! Retail walks 500 per 0.01s tick, but its GetGetAllResult is a cheap replicate read
+--! while ours costs a GetAuctionItemInfo + GetAuctionItemLink per auction, so copy the
+--! cadence, not the count: spend a frame budget and yield on retail's delay.
+local CHUNK_BUDGET_MS = 12 -- work per tick, leaves room inside a 16.7ms frame
+local CHUNK_MIN = 50 -- always advance this far, so one slow item cannot stall the walk
+local CHUNK_MAX = 2000 -- ceiling for cheap cached items, keeps one tick bounded
+local CHUNK_CHECK_EVERY = 25 -- items between clock reads; debugprofilestop is a C call
+local CHUNK_DELAY = 0.01 -- retail's inter-chunk delay (was 0.02)
 
 -- ============================================================================
 -- Time formatting / ETA helpers
@@ -347,7 +368,7 @@ function private.StartGetAllScan()
 	private.missingIndices = {}
 	private.retryPass = 0
 	private.pageRetries = {}
-	private.stats = { noLink = 0, noItemString = 0, noBuyout = 0, ok = 0, retryFound = 0, pageRetries = 0 }
+	private.stats = { noLink = 0, noItemString = 0, noBuyout = 0, ok = 0, retryFound = 0, pageRetries = 0, dupPages = 0, stalePolls = 0, chunks = 0 }
 	private.timeoutToken = (private.timeoutToken or 0) + 1
 	local myToken = private.timeoutToken
 
@@ -474,7 +495,7 @@ function private.OnStealthGetAllResult()
     private.missingIndices = {}
     private.retryPass = 0
     private.pageRetries = {}
-    private.stats = { noLink = 0, noItemString = 0, noBuyout = 0, ok = 0, retryFound = 0, pageRetries = 0 }
+    private.stats = { noLink = 0, noItemString = 0, noBuyout = 0, ok = 0, retryFound = 0, pageRetries = 0, dupPages = 0, stalePolls = 0, chunks = 0 }
 
     private.SafeUpdateUI(string.format("Processing %d auctions (stealth getAll)...", numBatch), 0.1)
     private.ProcessChunk(1, numBatch)
@@ -510,13 +531,14 @@ function private.StartPagedScanImpl()
 	private.pageRetries = {}
 	private.emptyPageRetries = {} -- map: page -> retryCount (пустые батчи в середине скана)
 	private.pageMissingList = nil
-	private.lastFirstLink, private.lastLastLink, private.lastSigBatch, private.lastMidLink = nil, nil, nil, nil -- dup-detector
+	private.lastPageSig = nil -- dup-detector
+	private.stalePollStart = nil
 	private.bypassDisabled = false -- авто-отключится при первом DUP-от-bypass
 	private.bypassProbeDropped = false
 	private.consecutiveBypassHits = 0
-		private.consecutiveDups = 0
+	private.consecutiveDups = 0
 	private.timeoutToken = (private.timeoutToken or 0) + 1 -- инвалидируем поллеры прошлого скана
-	private.stats = private.stats or { noLink = 0, noItemString = 0, noBuyout = 0, ok = 0, retryFound = 0, pageRetries = 0 }
+	private.stats = private.stats or { noLink = 0, noItemString = 0, noBuyout = 0, ok = 0, retryFound = 0, pageRetries = 0, dupPages = 0, stalePolls = 0, chunks = 0 }
 	private.startTime = private.startTime ~= 0 and private.startTime or GetTime()
 	private.throttleWaits = 0
 	private.SafeUpdateUI(string.format(L["Paged scan: page %d..."], 1), 0.05)
@@ -581,15 +603,8 @@ function private.OnPagedResult()
 		-- 	private.totalAuctions, private.totalPages, PAGE_SIZE))
 	end
 
-		-- Improved DUP detection: compare first, middle, and last links (not just first+last)
-		-- to avoid false positives when adjacent pages happen to share boundary items.
-		local firstLink = (numBatch and numBatch > 0) and GetAuctionItemLink("list", 1) or nil
-		local lastLink = (numBatch and numBatch > 0) and GetAuctionItemLink("list", numBatch) or nil
-		local midIdx = numBatch and numBatch > 2 and math.floor(numBatch / 2) or nil
-		local midLink = midIdx and GetAuctionItemLink("list", midIdx) or nil
-		local isDup = firstLink ~= nil and firstLink == private.lastFirstLink
-			and lastLink == private.lastLastLink and numBatch == private.lastSigBatch
-			and (not midLink or midLink == private.lastMidLink)
+		local sig = private.PageSignature(numBatch)
+		local isDup = sig ~= nil and sig == private.lastPageSig
 		if isDup and private.stats then
 			private.stats.dupPages = (private.stats.dupPages or 0) + 1
 		end
@@ -611,38 +626,86 @@ function private.OnPagedResult()
 				private.consecutiveBypassHits = 0
 			end
 		end
-		local dupTag = (isDup and serverTime < 0.03) and " |cffff0000DUP!|r" or ""
+		local dupTag = isDup and " |cffff0000DUP!|r" or ""
 		-- [debug off] ChatMessage.PrintfUser(string.format(
 		-- 	"|cff66ccff[FullScan]|r page %d/%d: %.2fs (throttle %.2fs + server %.2fs)  batch=%d %s%s",
 		-- 	private.currentPage + 1, private.totalPages > 0 and private.totalPages or 0,
 		-- 	totalPageTime, throttleWait, serverTime, numBatch or 0, modeTag, dupTag))
 
-		-- Real echo (сервер вернул буфер предыдущей страницы): НЕ обрабатываем его —
-		-- иначе аукционы предыдущей страницы посчитаются дважды (искажение marketValue),
-		-- а реальная страница будет пропущена целиком. Повторяем запрос той же страницы.
-		if isDup and serverTime < 0.03 then
-			private.consecutiveDups = (private.consecutiveDups or 0) + 1
-			if private.consecutiveDups <= MAX_DUP_REQUERIES then
-				local pageAtDup = private.currentPage
-				C_Timer.After(DUP_REQUERY_DELAY, function()
-					if private.scanState == "paged" and private.currentPage == pageAtDup then
-						private.QueryNextPage()
-					end
-				end)
-				return
-			end
-			-- Лимит повторов исчерпан — обрабатываем как есть, чтобы скан не завис
-			-- (возможен двойной учёт этой страницы, но это лучше вечного цикла).
-			ChatMessage.PrintfUser(string.format(
-				"|cffffaa00[FullScan]|r page %d echoed %d times in a row - processing as-is",
-				private.currentPage + 1, private.consecutiveDups))
-			private.consecutiveDups = 0
-		else
-			private.consecutiveDups = 0
+		--! WotLK fix: an identical page is usually the local "list" lagging the event, not a
+		--! server echo, so poll the buffer first and spend a re-query only if it never swaps.
+		--! The old gate fired only on serverTime<0.03, so a slow stale page was processed:
+		--! previous page counted twice (marketValue skew), real page skipped whole.
+		if isDup then
+			private.stalePollStart = GetTime()
+			private.PollStalePage(private.currentPage)
+			return
 		end
+		private.consecutiveDups = 0
+		private.ProcessPagedPage(numBatch, sig)
+	end
+
+--! WotLK fix: fingerprint from GetAuctionItemInfo, not GetAuctionItemLink. A link is nil
+--! while the item is still out of the client cache -- exactly when a stale read is most
+--! likely -- so the link-based check switched itself off in the case it had to catch.
+function private.PageSignature(numBatch)
+	if not numBatch or numBatch <= 0 then
+		return nil
+	end
+	local mid = math.floor((numBatch + 1) / 2)
+	local indexes = { 1, mid, numBatch }
+	local parts = { tostring(numBatch) }
+	for i = 1, #indexes do
+		local name, _, count, _, _, _, minBid, _, buyout, bid = GetAuctionItemInfo("list", indexes[i])
+		parts[#parts + 1] = string.format("%s/%d/%d/%d/%d", tostring(name or "?"),
+			count or 0, minBid or 0, buyout or 0, bid or 0)
+	end
+	return table.concat(parts, "|")
+end
+
+--! WotLK fix: re-read the live list without QueryAuctionItems. When 3.3.5a finally swaps
+--! the buffer the signature changes and the page is processed with no extra request; only
+--! a buffer that never swaps within STALE_POLL_TIMEOUT counts as a real server echo.
+function private.PollStalePage(pageAtStale)
+	if private.scanState ~= "paged" or private.currentPage ~= pageAtStale then
+		return
+	end
+	local numBatch = GetNumAuctionItems("list")
+	local sig = private.PageSignature(numBatch)
+	if sig ~= nil and sig ~= private.lastPageSig then
+		if private.stats then private.stats.stalePolls = (private.stats.stalePolls or 0) + 1 end
+		private.consecutiveDups = 0
+		private.ProcessPagedPage(numBatch, sig)
+		return
+	end
+	if GetTime() - (private.stalePollStart or 0) < STALE_POLL_TIMEOUT then
+		C_Timer.After(STALE_POLL_STEP, function()
+			private.PollStalePage(pageAtStale)
+		end)
+		return
+	end
+	private.consecutiveDups = (private.consecutiveDups or 0) + 1
+	if private.consecutiveDups <= MAX_DUP_REQUERIES then
+		C_Timer.After(DUP_REQUERY_DELAY, function()
+			if private.scanState == "paged" and private.currentPage == pageAtStale then
+				private.QueryNextPage()
+			end
+		end)
+		return
+	end
+	-- Retry budget spent -- process the page as it is so the scan cannot hang
+	-- (this page may be counted twice, which still beats an endless loop).
+	ChatMessage.PrintfUser(string.format(
+		"|cffffaa00[FullScan]|r page %d echoed %d times in a row - processing as-is",
+		private.currentPage + 1, private.consecutiveDups))
+	private.consecutiveDups = 0
+	private.ProcessPagedPage(numBatch, sig)
+end
+
+function private.ProcessPagedPage(numBatch, sig)
 		-- Update page fingerprint AFTER DUP check (only for clean pages)
-		private.lastFirstLink, private.lastLastLink, private.lastSigBatch, private.lastMidLink =
-			firstLink, lastLink, numBatch, midLink
+		private.lastPageSig = sig
+		private.stalePollStart = nil
 
 		-- Транзиентный пустой батч в середине скана (сервер иногда отдаёт пустой ответ
 		-- под нагрузкой): НЕ считаем это концом АХ — повторяем страницу с лимитом.
@@ -885,18 +948,27 @@ function private.ProcessSingleAuction(idx)
 end
 
 function private.ProcessChunk(startIdx, total)
-	local CHUNK_SIZE = 200
-	local endIdx = math.min(startIdx + CHUNK_SIZE - 1, total)
-
-	for i = startIdx, endIdx do
+	--! WotLK perf: budgeted walk, see CHUNK_BUDGET_MS. Ends on whichever comes first --
+	--! the time budget, CHUNK_MAX, or the end of the dump; CHUNK_MIN guarantees progress.
+	local budgetStart = debugprofilestop()
+	local endIdx = startIdx - 1
+	local limit = math.min(startIdx + CHUNK_MAX - 1, total)
+	local walked = 0
+	if private.stats then private.stats.chunks = (private.stats.chunks or 0) + 1 end
+	for i = startIdx, limit do
 		private.ProcessSingleAuction(i)
+		endIdx = i
+		walked = walked + 1
+		if walked >= CHUNK_MIN and walked % CHUNK_CHECK_EVERY == 0 and debugprofilestop() - budgetStart > CHUNK_BUDGET_MS then
+			break
+		end
 	end
 
 	local progress = 0.1 + (endIdx / total) * 0.7
 	private.SafeUpdateUI(FormatProgressLine(L["Processing"], endIdx, total), progress)
 
 	if endIdx < total then
-		C_Timer.After(0.02, function()
+		C_Timer.After(CHUNK_DELAY, function()
 			private.ProcessChunk(endIdx + 1, total)
 		end)
 	else
@@ -1000,6 +1072,26 @@ function private.EndScan()
 	end
 
 	local elapsed = GetTime() - (private.startTime or GetTime())
+	--! WotLK feature: freeze the diagnostic counters of the finished scan. private.stats is
+	--! wiped by the next scan and is file-local, so without this snapshot the harness cannot
+	--! tell a clean paged run from one that kept re-reading stale pages.
+	private.lastScanStats = {
+		mode = private.mode,
+		elapsed = elapsed,
+		auctions = private.totalAuctions,
+		records = recordCount,
+		saved = save and recordCount > 0 or false,
+		pages = private.totalPages,
+		ok = private.stats and private.stats.ok or 0,
+		noLink = private.stats and private.stats.noLink or 0,
+		noItemString = private.stats and private.stats.noItemString or 0,
+		noBuyout = private.stats and private.stats.noBuyout or 0,
+		pageRetries = private.stats and private.stats.pageRetries or 0,
+		retryFound = private.stats and private.stats.retryFound or 0,
+		dupPages = private.stats and private.stats.dupPages or 0,
+		stalePolls = private.stats and private.stats.stalePolls or 0,
+		chunks = private.stats and private.stats.chunks or 0,
+	}
 	if save then
 		private.SafeUpdateUI(
 			string.format(L["Done! %d auctions, %d items in %.1fs (%s mode)"],
@@ -1024,6 +1116,13 @@ function private.EndScan()
 end
 
 
+
+---Returns the diagnostic counters of the last finished full scan (nil before the first one).
+---Read by the audit harness through TSMAddon.UI.AuctionUI.FullScan.
+---@return table?
+function FullScan.GetLastScanStats()
+	return private.lastScanStats
+end
 
 function private.SafeUpdateUI(text, progress)
 	-- Весь UI update обёрнут в pcall: GetElement бросает error если child удалён,

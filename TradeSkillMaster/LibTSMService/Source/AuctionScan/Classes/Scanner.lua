@@ -27,6 +27,8 @@ local private = {
 	browseIsNoScan = false,
 	browseIndex = 1,
 	browsePendingIndexes = {},
+	-- 3.3.5 perf: true while a budgeted post-browse walk is in progress across frames
+	browsePostActive = false,
 	browseSellerRetries = {},
 	searchRow = nil,
 	useCachedData = nil,
@@ -194,6 +196,7 @@ Scanner:OnModuleLoad(function()
 				else
 					private.browseIndex = 1
 					wipe(private.browsePendingIndexes)
+					private.ResetBrowsePostWalk()
 				end
 				return "ST_BROWSE_CHECKING"
 			end)
@@ -270,6 +273,7 @@ Scanner:OnModuleLoad(function()
 					private.browseIndex = 1
 					wipe(private.browsePendingIndexes)
 					wipe(private.browseSellerRetries)
+					private.ResetBrowsePostWalk()
 				end
 				return "ST_BROWSE_CHECKING"
 			end)
@@ -752,10 +756,15 @@ function private.CheckBrowseResults()
 		end
 	end
 
-	-- Attempt to populate the browse results
-	wipe(private.missingItemIds)
+	--! WotLK perf: with getAll a "page" is the whole auction house, so on the classic
+	-- path the populate/filter/count stages below run in time-budgeted chunks and resume
+	-- on the next frame. Retail keeps the original one-shot form: it has no getAll, and
+	-- its pages are ~50 rows.
+	local isClassicPost = not ClientInfo.HasFeature(ClientInfo.FEATURES.C_AUCTION_HOUSE)
 	local populated, numRemoved = nil, 0
-	if ClientInfo.HasFeature(ClientInfo.FEATURES.C_AUCTION_HOUSE) then
+	if not isClassicPost then
+		-- Attempt to populate the browse results
+		wipe(private.missingItemIds)
 		populated, numRemoved = private.query:_PopulateBrowseData(private.missingItemIds)
 		if numRemoved > 0 then
 			Log.Info("Removed %d results while populing data", numRemoved)
@@ -763,20 +772,45 @@ function private.CheckBrowseResults()
 		if not populated then
 			return false
 		end
+
+		-- Filter the results
+		numRemoved = private.query:_FilterBrowseResults()
+		if numRemoved > 0 then
+			Log.Info("Removed %d filtered results", numRemoved)
+			TSMDBG.Log("Scanner", "Filtered out %d results", numRemoved)
+		end
 	else
-		TSMDBG.Log("Scanner", "Calling _PopulateBrowseData (classic, no-wait)")
-		populated, numRemoved = private.query:_PopulateBrowseData(private.missingItemIds)
+		-- Only wipe the pending ids when a fresh post-walk starts: mid-walk re-entry must
+		-- keep the ids collected by the earlier chunks (ST_BROWSE_CHECKING consumes them)
+		if not private.browsePostActive then
+			private.browsePostActive = true
+			wipe(private.missingItemIds)
+			TSMDBG.Log("Scanner", "Calling _PopulateBrowseData (classic, budgeted)")
+		end
+
+		-- Attempt to populate the browse results
+		local isDone = nil
+		isDone, populated, numRemoved = private.query:_PopulateBrowseDataBudgeted(private.missingItemIds, BROWSE_PROCESS_TIME_BUDGET_MS)
+		if not isDone then
+			private.updateTimer:RunForFrames(1)
+			return false
+		end
 		if numRemoved > 0 then
 			Log.Info("Removed %d results while populing data", numRemoved)
 		end
 		populated = true
-	end
 
-	-- Filter the results
-	numRemoved = private.query:_FilterBrowseResults()
-	if numRemoved > 0 then
-		Log.Info("Removed %d filtered results", numRemoved)
-		TSMDBG.Log("Scanner", "Filtered out %d results", numRemoved)
+		-- Filter the results
+		isDone, numRemoved = private.query:_FilterBrowseResultsBudgeted(BROWSE_PROCESS_TIME_BUDGET_MS)
+		if not isDone then
+			private.updateTimer:RunForFrames(1)
+			return false
+		end
+		if numRemoved > 0 then
+			Log.Info("Removed %d filtered results", numRemoved)
+			TSMDBG.Log("Scanner", "Filtered out %d results", numRemoved)
+		end
+		private.browsePostActive = false
 	end
 
 	-- Count final results
@@ -788,6 +822,14 @@ function private.CheckBrowseResults()
 	TSMDBG.TimeEnd("Scanner:CheckBrowseResults")
 
 	return true
+end
+
+--! WotLK perf: drops a half-finished budgeted post-walk when a new page invalidates it.
+function private.ResetBrowsePostWalk()
+	private.browsePostActive = false
+	if private.query then
+		private.query:_ResetChunk()
+	end
 end
 
 function private.ProcessBrowseResultClassic(index)

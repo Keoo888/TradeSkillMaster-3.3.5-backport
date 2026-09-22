@@ -90,6 +90,12 @@ function AuctionQuery:__init()
 	self._lastPageFingerprint = nil
 	self._incrementalFilter = false
 	self._dirtyRows = {}
+	--! WotLK perf: cursor for the budgeted post-browse stages (see _BeginChunk)
+	self._chunkStage = nil
+	self._chunkKeys = {}
+	self._chunkIndex = 1
+	self._chunkRemoved = 0
+	self._chunkSuccess = true
 end
 
 function AuctionQuery:_Release()
@@ -141,6 +147,7 @@ function AuctionQuery:_Release()
 	self._lastPageFingerprint = nil
 	self._incrementalFilter = false
 	wipe(self._dirtyRows)
+	self:_ResetChunk()
 end
 
 
@@ -385,6 +392,9 @@ end
 ---Starts the browse query.
 ---@return Future
 function AuctionQuery:Browse()
+	--! WotLK perf: a new browse pass invalidates any half-finished budgeted walk left
+	-- over from the previous pass, so drop its cursor before the results change.
+	self:_ResetChunk()
 	-- 3.3.5: очищаем stale subRows перед новым browse (чтобы UI не показывал старые лоты)
 	-- Sniper accumulate mode (SetAccumulate) skips this wipe so found lots persist
 	-- in the list across rescans instead of vanishing each pass.
@@ -1018,6 +1028,148 @@ function AuctionQuery:_PopulateBrowseData(missingItemIds)
 		end
 	end
 	return success, numRemoved
+end
+
+--! WotLK perf: on 3.3.5a a getAll browse hands us the ENTIRE auction house as a single
+-- page, so the two post-browse stages below (which on retail only ever see ~50 rows, and
+-- whose FilterSubRows branch retail never reaches at all because it has C_AUCTION_HOUSE)
+-- walked tens of thousands of rows inside one frame. They are chunked here: each call
+-- does at most budgetMs of work and reports whether it finished, so Scanner can resume
+-- on the next frame instead of freezing the client.
+
+---Starts a chunked walk over the browse results, or resumes the one already in progress.
+---@private
+function AuctionQuery:_BeginChunk(stage)
+	if self._chunkStage == stage then
+		return
+	end
+	self._chunkStage = stage
+	self._chunkIndex = 1
+	self._chunkRemoved = 0
+	self._chunkSuccess = true
+	wipe(self._chunkKeys)
+	local numKeys = 0
+	for baseItemString in pairs(self._browseResults) do
+		numKeys = numKeys + 1
+		self._chunkKeys[numKeys] = baseItemString
+	end
+end
+
+---Drops any in-progress chunked walk.
+---@private
+function AuctionQuery:_ResetChunk()
+	self._chunkStage = nil
+	self._chunkIndex = 1
+	self._chunkRemoved = 0
+	self._chunkSuccess = true
+	wipe(self._chunkKeys)
+end
+
+---@private
+function AuctionQuery:_EndChunk()
+	local numRemoved = self._chunkRemoved
+	self:_ResetChunk()
+	return numRemoved
+end
+
+---Budgeted form of _PopulateBrowseData for the classic (non-C_AUCTION_HOUSE) path.
+---@param missingItemIds table
+---@param budgetMs number
+---@return boolean isDone
+---@return boolean success
+---@return number numRemoved
+---@private
+function AuctionQuery:_PopulateBrowseDataBudgeted(missingItemIds, budgetMs)
+	self:_BeginChunk("populate")
+	local keys = self._chunkKeys
+	local numKeys = #keys
+	local index = self._chunkIndex
+	local budgetStart = debugprofilestop()
+	while index <= numKeys do
+		local baseItemString = keys[index]
+		local row = self._browseResults[baseItemString]
+		index = index + 1
+		-- The row may have been removed by an earlier chunk, so skip a stale key
+		if row then
+			local ok, hasInfo, giveUp = pcall(row.PopulateBrowseData, row, missingItemIds)
+			if not ok then
+				TSMDBG.LogErr("Query:_PopulateBrowseData row=" .. tostring(baseItemString), hasInfo)
+				row:Release()
+				self._browseResults[baseItemString] = nil
+				self._chunkRemoved = self._chunkRemoved + 1
+			elseif not hasInfo and giveUp then
+				row:Release()
+				self._browseResults[baseItemString] = nil
+				self._chunkRemoved = self._chunkRemoved + 1
+			elseif not hasInfo then
+				self._chunkSuccess = false
+			end
+		end
+		if debugprofilestop() - budgetStart > budgetMs then
+			break
+		end
+	end
+	self._chunkIndex = index
+	if index <= numKeys then
+		return false, false, 0
+	end
+	local success = self._chunkSuccess
+	return true, success, self:_EndChunk()
+end
+
+---Budgeted form of _FilterBrowseResults for the classic (non-C_AUCTION_HOUSE) path.
+---@param budgetMs number
+---@return boolean isDone
+---@return number numRemoved
+---@private
+function AuctionQuery:_FilterBrowseResultsBudgeted(budgetMs)
+	self:_BeginChunk("filter")
+	local keys = self._chunkKeys
+	local numKeys = #keys
+	local index = self._chunkIndex
+	local budgetStart = debugprofilestop()
+	local useIncremental = self._incrementalFilter
+	-- Hoisted out of the loop: the query's filters can't change mid-walk, and this used
+	-- to be re-evaluated for every row
+	local hasSubRowFilters = self:_HasSubRowFilters(true)
+	while index <= numKeys do
+		local baseItemString = keys[index]
+		local row = self._browseResults[baseItemString]
+		index = index + 1
+		if row and not (useIncremental and not self._dirtyRows[baseItemString]) then
+			local isFiltered = false
+			local filterSubRows = false
+			-- 3.3.5: filter by query text in ProcessBrowseResultClassic, not here
+			if row:GetNumSubRows() == 0 then
+				isFiltered = true
+			elseif hasSubRowFilters then
+				-- pcall on the method directly: the old closure form allocated a garbage
+				-- function for every row of the getAll dump
+				local ok, errOrRes = pcall(row.FilterSubRows, row, self)
+				if ok then
+					filterSubRows = errOrRes
+				else
+					TSMDBG.LogErr("Query:FilterSubRows", errOrRes)
+				end
+			end
+			if isFiltered or filterSubRows then
+				row:Release()
+				self._browseResults[baseItemString] = nil
+				self._chunkRemoved = self._chunkRemoved + 1
+			end
+		end
+		if debugprofilestop() - budgetStart > budgetMs then
+			break
+		end
+	end
+	self._chunkIndex = index
+	if index <= numKeys then
+		return false, 0
+	end
+	if useIncremental then
+		wipe(self._dirtyRows)
+	end
+	return true, self:_EndChunk()
 end
 
 
