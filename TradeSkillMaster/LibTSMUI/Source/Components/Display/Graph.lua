@@ -566,9 +566,15 @@ end
 
 function Graph.__private:_GetCursorClosestPoint()
 	local plot = self:_GetBaseFrame().plot
-	local xPos = GetCursorPosition() / plot:GetEffectiveScale()
 	local fromMin = plot:GetLeft()
 	local fromMax = plot:GetRight()
+	--! WotLK fix: anchor-derived geometry lags a frame on 3.3.5a -- the same lag _HandleResizeRedraw
+	--! defers around -- so these answer nil on the frame the hover OnUpdate starts on, and Math.Bound
+	--! took nil bounds. No rect means no point; callers skip the frame instead of erroring.
+	if not fromMin or not fromMax then
+		return nil, nil
+	end
+	local xPos = GetCursorPosition() / plot:GetEffectiveScale()
 	-- Convert the cursor position to be relative to the plotted x values
 	xPos = Math.Scale(Math.Bound(xPos, fromMin, fromMax), fromMin, fromMax, self._zoomStart, self._zoomEnd)
 	-- Find the closest point to the cursor (based on the x distance)
@@ -606,7 +612,13 @@ function Graph.__private:_HandlePlotMouseDown(_, mouseButton)
 		return
 	end
 	assert(self._state.mouseOver)
-	self._state.selectionStartX = self:_GetCursorClosestPoint()
+	--! WotLK fix: no point means the plot has no rect yet (see _GetCursorClosestPoint) -- start no
+	--! selection rather than storing nil, which min()/max() in _HandlePlotMouseUp would take.
+	local startX = self:_GetCursorClosestPoint()
+	if not startX then
+		return
+	end
+	self._state.selectionStartX = startX
 end
 
 function Graph.__private:_HandlePlotMouseUp(_, mouseButton)
@@ -614,6 +626,12 @@ function Graph.__private:_HandlePlotMouseUp(_, mouseButton)
 		return
 	end
 	local currentX = self:_GetCursorClosestPoint()
+	--! WotLK fix: same missing rect -- drop the selection instead of comparing against nil.
+	if not currentX or not self._state.selectionStartX then
+		self._state.selectionStartX = nil
+		self:_GetBaseFrame().plot.selectionBox:Hide()
+		return
+	end
 	local startX = min(self._state.selectionStartX, currentX)
 	local endX = max(self._state.selectionStartX, currentX)
 	self._state.selectionStartX = nil
@@ -633,6 +651,11 @@ end
 function Graph.__private:_HandlePlotUpdate()
 	local plot = self:_GetBaseFrame().plot
 	local closestX, closestY = self:_GetCursorClosestPoint()
+	--! WotLK fix: the plot's rect is not resolved on this frame (see _GetCursorClosestPoint). Skip the
+	--! tick; the OnUpdate stays installed, so the hover draws itself on the next one.
+	if not closestX then
+		return
+	end
 	local xCoord = self:_XValueToPlotCoord(closestX)
 	local yCoord = Math.Scale(closestY, self._yMin, self._yMax, 0, plot:GetHeight())
 

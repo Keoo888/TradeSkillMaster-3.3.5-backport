@@ -4,7 +4,10 @@
 local Private = __TSM_ClassicAPI_Private
 
 local _G = _G
-local Enum = Enum
+--! WotLK fix: bind our Private.Enum, not _G.Enum. EnumSupport writes __ItemClassInfo/
+--! __InventoryTypeInfo into Private.Enum AFTER Publish; with a neighbour owning _G.Enum those
+--! tables never reach the global, so GetItem*Info indexed a nil field and killed API.Item's chunk.
+local Enum = Private and Private.Enum or Enum
 local Type = type
 local Number = tonumber
 local Match = string.match

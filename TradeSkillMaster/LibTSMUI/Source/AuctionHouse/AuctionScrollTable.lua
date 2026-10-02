@@ -993,9 +993,17 @@ end
 function AuctionScrollTable.__protected:_GetSortValue(row, id, isAscending)
 	if id == "item" then
 		local baseItemString = row:GetBaseItemString()
+		--! WotLK fix: our PopulateBrowseData marks a row ready straight off the browse
+		--! result, so HasItemInfo() can be true while the ItemInfo cache still misses.
+		--! A nil sort value then kills Table.SortWithValueLookup and aborts the rebuild.
 		return ItemInfo.GetName(baseItemString)
+			or (row:IsSubRow() and row:GetItemInfo())
+			or baseItemString
+			or ""
 	elseif id == "ilvl" then
+		--! WotLK fix: same cache miss as "item" above - keep the value sortable.
 		return ItemInfo.GetItemLevel(row:GetItemString() or row:GetBaseItemString())
+			or (isAscending and math.huge or -math.huge)
 	elseif id == "posts" then
 		local _, numAuctions = row:GetQuantities()
 		return numAuctions or (isAscending and math.huge or -math.huge)
