@@ -28,6 +28,7 @@
 <p align="center">
   <a href="#modules">Modules</a> ·
   <a href="#installation">Installation</a> ·
+  <a href="#license">License</a> ·
   <a href="#credits">Credits</a>
 </p>
 
@@ -110,6 +111,14 @@ based on your groups, and empty your mailbox with a single click.
 - Built and tested on **Warmane** (WoW 3.3.5a, Interface `30300`).
 - Developed exclusively for **Warmane**. I am not responsible for functionality on other servers.
 
+<a name="license"></a>
+### License
+
+The original TradeSkillMaster project does not provide an open-source license.
+TSM remains the property of the TSM Team; this repository is a 3.3.5a backport
+and grants no additional rights. Embedded libraries keep their own licenses:
+LibDeflate and LibRealmInfo are zlib, LibStub is public domain.
+
 <a name="credits"></a>
 ### Credits
 
@@ -124,6 +133,7 @@ based on your groups, and empty your mailbox with a single click.
 <p align="center">
   <a href="#модули">Модули</a> ·
   <a href="#установка">Установка</a> ·
+  <a href="#лицензия">Лицензия</a> ·
   <a href="#благодарности">Благодарности</a>
 </p>
 
@@ -207,6 +217,14 @@ based on your groups, and empty your mailbox with a single click.
 
 - Собрано и протестировано на **Warmane** (WoW 3.3.5a, Interface `30300`).
 - Разрабатывалось исключительно для **Warmane**. За работоспособность на других серверах ответственности не несу.
+
+<a name="лицензия"></a>
+### Лицензия
+
+Оригинальный проект TradeSkillMaster не предоставляет открытую лицензию.
+TSM остаётся собственностью команды TSM; этот репозиторий — бэкпорт под 3.3.5a
+и не даёт дополнительных прав. Встроенные библиотеки сохраняют свои лицензии:
+LibDeflate и LibRealmInfo — zlib, LibStub — public domain.
 
 <a name="благодарности"></a>
 ### Благодарности
